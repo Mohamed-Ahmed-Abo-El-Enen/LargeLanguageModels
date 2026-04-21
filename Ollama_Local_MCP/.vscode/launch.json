@@ -1,0 +1,77 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Streamlit UI",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "streamlit",
+            "args": [
+                "run",
+                "streamlit_app.py",
+                "--server.headless",
+                "false"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        // {
+        //     "name": "MCP server (stdio)",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "${workspaceFolder}/main.py",
+        //     "args": [
+        //         "server"
+        //     ],
+        //     "console": "integratedTerminal",
+        //     "justMyCode": false
+        // },
+        // {
+        //     "name": "check (Ollama connectivity)",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "${workspaceFolder}/main.py",
+        //     "args": [
+        //         "check"
+        //     ],
+        //     "console": "integratedTerminal"
+        // },
+        // {
+        //     "name": "skills (list registered)",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "${workspaceFolder}/main.py",
+        //     "args": [
+        //         "skills"
+        //     ],
+        //     "console": "integratedTerminal"
+        // },
+        // {
+        //     "name": "sessions (list saved)",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "${workspaceFolder}/main.py",
+        //     "args": [
+        //         "sessions"
+        //     ],
+        //     "console": "integratedTerminal"
+        // },
+        // {
+        //     "name": "seed (default skills)",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "${workspaceFolder}/main.py",
+        //     "args": [
+        //         "seed"
+        //     ],
+        //     "console": "integratedTerminal"
+        // },
+        {
+            "name": "Current file",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        }
+    ]
+}

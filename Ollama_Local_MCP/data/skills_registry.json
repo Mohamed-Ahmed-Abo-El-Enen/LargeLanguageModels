@@ -1,0 +1,40 @@
+{
+  "skills": [
+    {
+      "name": "grammar_fix",
+      "description": "Fix grammar and spelling. Returns corrected text only.",
+      "system_prompt": "Fix all grammar, spelling, and punctuation. Return ONLY the corrected text.",
+      "user_prompt_template": "Fix this: {input}"
+    },
+    {
+      "name": "sentiment",
+      "description": "Detect sentiment: Positive, Negative, or Neutral.",
+      "system_prompt": "Return ONLY one word: Positive, Negative, or Neutral.",
+      "user_prompt_template": "Sentiment of: {input}"
+    },
+    {
+      "name": "bullet_points",
+      "description": "Rewrite text as a clean bullet-point list. No intro or outro.",
+      "system_prompt": "Rewrite the input as a concise bullet-point list. Return ONLY the bullets, no preamble or summary sentence.",
+      "user_prompt_template": "Convert to bullet points:\n\n{input}"
+    },
+    {
+      "name": "names_delete",
+      "description": "A skill to remove persoanl names from text",
+      "system_prompt": "You are a smart pesonal name detector to delete the name from text",
+      "user_prompt_template": "Text of: {input}",
+      "model": "llama3.2:latest"
+    }
+  ],
+  "agents": [
+    {
+      "name": "news_analyst",
+      "description": "Search for news on a topic and produce an executive summary with sources.",
+      "system_prompt": "You are a senior analyst. Summarize clearly. Cite sources by [number].",
+      "tools": [
+        "web_search",
+        "summarize"
+      ]
+    }
+  ]
+}
