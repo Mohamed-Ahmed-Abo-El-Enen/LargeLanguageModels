@@ -14,12 +14,7 @@ VISION_MODELS = {"gemma3", "qwen3-vl"}
 
 TOOL_CAPABLE_MODELS = {
     "llama3.1", "llama3.2", "llama3.3",
-    "qwen2.5", "qwen3", 
-    "mistral-nemo",
-    "command-r", "command-r7b",
-    "granite3", "granite3.1",
-    "firefunction-v2",
-    "hermes3",
+    "qwen2.5", "qwen3"
 }
 
 

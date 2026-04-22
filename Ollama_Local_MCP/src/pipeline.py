@@ -1,8 +1,9 @@
 from typing import TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
+from langchain.agents import create_agent
 from langgraph.graph import END, START, StateGraph
-from src.vector import retrieve 
+from src.vector import retrieve
 
 from src.config import DEFAULT_MODEL, OLLAMA_BASE
 from src.logger import get_logger, log_call
@@ -16,6 +17,15 @@ class PipelineState(TypedDict):
     context: str
     outputs: list[dict]
     final:   str
+
+
+def _resolve_agent_tools(agent: dict) -> list:
+    """Map the agent's configured tool names to real @tool objects. Excludes run_agent to prevent recursion."""
+    names = set(agent.get("tools") or [])
+    if not names:
+        return []
+    from src.agent import TOOLS as _TOP_TOOLS
+    return [t for t in _TOP_TOOLS if t.name in names and t.name != "run_agent"]
 
 
 def _format_prior(outputs: list[dict]) -> str:
@@ -33,23 +43,54 @@ def _build_user_prompt(state: PipelineState) -> str:
 
 
 def _make_agent_node(agent: dict):
-    """Build a LangGraph node for a single registered agent."""
+    """Build a LangGraph node. ReAct if the agent has tools, plain llm.invoke if not."""
+    tools = _resolve_agent_tools(agent)
 
     def node(state: PipelineState) -> dict:
-        log.info("pipeline agent start: %s (prior=%d)", agent["name"], len(state["outputs"]))
+        log.info(
+            "pipeline agent start: %s (prior=%d, tools=%d)",
+            agent["name"], len(state["outputs"]), len(tools),
+        )
         llm = ChatOllama(
             model=agent.get("model", DEFAULT_MODEL),
             base_url=OLLAMA_BASE,
         )
-        response = llm.invoke([
-            SystemMessage(content=agent["system_prompt"]),
-            HumanMessage(content=_build_user_prompt(state)),
-        ])
-        output = response.content if hasattr(response, "content") else str(response)
-        log.info("pipeline agent done: %s (chars=%d)", agent["name"], len(output))
+        user_prompt = _build_user_prompt(state)
+
+        output = ""
+        sub_trace: list[str] = []
+
+        if tools:
+            from src.agent import _extract_tool_trace
+            react = create_agent(llm, tools=tools, system_prompt=agent["system_prompt"])
+            try:
+                result = react.invoke({"messages": [HumanMessage(content=user_prompt)]})
+                msgs = result.get("messages", []) or []
+                if msgs:
+                    last = msgs[-1]
+                    output = last.content if hasattr(last, "content") else str(last)
+                sub_trace = _extract_tool_trace(msgs)
+            except Exception as exc:
+                log.exception("pipeline agent %s failed in ReAct mode", agent["name"])
+                output = f"(agent error: {type(exc).__name__}: {exc})"
+        else:
+            response = llm.invoke([
+                SystemMessage(content=agent["system_prompt"]),
+                HumanMessage(content=user_prompt),
+            ])
+            output = response.content if hasattr(response, "content") else str(response)
+
+        log.info(
+            "pipeline agent done: %s (chars=%d, trace=%s)",
+            agent["name"], len(output), sub_trace,
+        )
+
+        entry = {"agent": agent["name"], "output": output}
+        if sub_trace:
+            entry["tool_trace"] = sub_trace
 
         return {
-            "outputs": state["outputs"] + [{"agent": agent["name"], "output": output}],
+            "outputs": state["outputs"] + [entry],
             "final":   output,
         }
 
@@ -58,7 +99,6 @@ def _make_agent_node(agent: dict):
 
 
 def _retrieve_node(state: PipelineState) -> dict:
-    """Optional FAISS retrieval step. Tolerant of a missing/unavailable index."""
     try:
         docs = retrieve(state["input"])
         if not docs:
@@ -74,7 +114,6 @@ def _retrieve_node(state: PipelineState) -> dict:
 
 
 def build_graph(use_retrieval: bool = True):
-    """Compile a LangGraph whose node order matches the registry."""
     agents = list_agents()
     graph = StateGraph(PipelineState)
 
@@ -102,7 +141,6 @@ def build_graph(use_retrieval: bool = True):
 
 @log_call
 def run_pipeline(user_input: str, use_retrieval: bool = True) -> dict:
-    """Execute the full sequential pipeline and return a structured result."""
     graph = build_graph(use_retrieval=use_retrieval)
     final_state = graph.invoke({
         "input":   user_input,
@@ -120,5 +158,4 @@ def run_pipeline(user_input: str, use_retrieval: bool = True) -> dict:
 
 
 def list_pipeline() -> list[dict]:
-    """Return the agents in pipeline execution order (name + description only)."""
     return [{"name": a["name"], "description": a["description"]} for a in list_agents()]

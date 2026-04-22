@@ -100,7 +100,6 @@ def build_router_system_prompt(
     skills: list[dict],
     agents: Optional[list[dict]] = None,
 ) -> str:
-    """Assemble the router's system prompt from static blocks + dynamic context."""
     parts = [_AUTHORITY, _TOOL_RULES, _PRIORITY_AND_CHAINING]
 
     if file_path:

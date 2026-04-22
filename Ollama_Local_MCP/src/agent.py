@@ -15,6 +15,7 @@ from src.logger import get_logger, log_call
 from src.registry import get_agent, list_agents, list_skills
 from src.logger import _preview as _prev
 from src.tools import envelope
+from src.prompts import build_router_system_prompt
 
 log = get_logger(__name__)
 
@@ -117,11 +118,7 @@ def code_review(code: str, language: str = "Python") -> dict:
 
 @tool
 def run_agent(agent_name: str, task: str, context: Optional[dict] = None) -> dict:
-    """Invoke a registered custom agent as a sub-agent. 
-
-    The sub-agent has access to all basic tools (web_search, fetch_page, pdf_*,
-    *_image, run_skill, summarize, etc.).
-    """
+    """Invoke a registered custom agent as a sub-agent. The sub-agent has access to all basic tools (web_search, fetch_page, pdf_*, *_image, run_skill, summarize, etc.)."""
     agent_def = get_agent(agent_name)
     if not agent_def:
         names = [a["name"] for a in list_agents()]
@@ -156,7 +153,11 @@ def run_agent(agent_name: str, task: str, context: Optional[dict] = None) -> dic
         1 for m in out_msgs
         if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)
     )
-    log.info("run_agent done: %s chars=%d tool_hops=%d", agent_name, len(final), tool_hops)
+    sub_trace = _extract_tool_trace(out_msgs)
+    log.info(
+        "run_agent done: %s chars=%d tool_hops=%d trace=%s",
+        agent_name, len(final), tool_hops, sub_trace,
+    )
 
     return envelope(
         skill=agent_name,
@@ -166,6 +167,7 @@ def run_agent(agent_name: str, task: str, context: Optional[dict] = None) -> dic
             "input_chars": len(task or ""),
             "output_chars": len(final),
             "tool_hops": tool_hops,
+            "tool_trace": sub_trace,
             "total_msgs": len(out_msgs),
             "duration_s": round(time.perf_counter() - t0, 3),
             "context_keys": list((context or {}).keys()),
@@ -198,8 +200,6 @@ def _system_prompt(
     skills: list[dict],
     agents: Optional[list[dict]] = None,
 ) -> str:
-    """Build the router's system prompt. Delegates to src.prompts for the static text."""
-    from src.prompts import build_router_system_prompt
     return build_router_system_prompt(file_path, skills, agents)
 
 
@@ -216,7 +216,6 @@ def _history_messages(session_id: Optional[str]) -> list:
 
 
 def _is_unsupported_tools_error(exc: Exception) -> bool:
-    """Heuristic match for Ollama's 'model X does not support tools' response."""
     msg = str(exc).lower()
     return "does not support tools" in msg or "tools not supported" in msg
 
@@ -227,7 +226,7 @@ def _fallback_chat(
     session_id: Optional[str],
     model: str,
 ) -> str:
-    """Plain chat (no tool binding) for models that reject the `tools` param."""
+    # Some Ollama models reject the tools param. Strip it and just chat.
     llm = ChatOllama(model=model, base_url=OLLAMA_BASE)
 
     parts = ["You are a helpful assistant."]
@@ -253,7 +252,7 @@ def run_router(
     session_id: Optional[str] = None,
     model: str = DEFAULT_MODEL,
 ) -> str:
-    """Let the LLM decide which tool(s) to call. Returns the final response text."""
+    """Stage 1: ReAct router. Stage 2: pipe through the agent pipeline if any agents are registered."""
     llm = ChatOllama(model=model, base_url=OLLAMA_BASE)
     system = _system_prompt(file_path, list_skills(), list_agents())
     agent = create_agent(llm, tools=TOOLS, system_prompt=system)
@@ -331,13 +330,53 @@ def run_router(
             )
             final = "_No usable answer was produced. Please rephrase the request or retry._"
 
+    pipeline_trace = _run_pipeline_stage(final)
+    if pipeline_trace is not None:
+        final = pipeline_trace["final"]
+
+    footer_parts: list[str] = []
     if tool_trace:
-        final = f"{final}\n\n---\n_Tools used: {' -> '.join(tool_trace)}_"
+        footer_parts.append(f"Tools used: {' -> '.join(tool_trace)}")
+    if pipeline_trace and pipeline_trace["trace"]:
+        footer_parts.append(f"Pipeline: {' -> '.join(pipeline_trace['trace'])}")
+    if footer_parts:
+        final = f"{final}\n\n---\n_" + " | ".join(footer_parts) + "_"
     return final
 
 
+def _run_pipeline_stage(stage1_final: str) -> Optional[dict]:
+    """Run the agent pipeline on Stage 1's output. Returns None when no agents are registered (skip Stage 2)."""
+    agents = list_agents()
+    if not agents:
+        return None
+
+    from src.pipeline import run_pipeline
+    log.info(
+        "pipeline stage start: %d agents, stage1_chars=%d",
+        len(agents), len(stage1_final),
+    )
+    try:
+        stage2 = run_pipeline(stage1_final, use_retrieval=False)
+    except Exception:
+        log.exception("pipeline stage failed; keeping Stage 1 output")
+        return {"final": stage1_final, "trace": []}
+
+    trace: list[str] = []
+    for o in stage2.get("outputs", []) or []:
+        sub = o.get("tool_trace") or []
+        trace.append(
+            f"{o['agent']}[{' -> '.join(sub)}]" if sub else o["agent"]
+        )
+
+    final = stage2.get("final") or stage1_final
+    log.info(
+        "pipeline stage done: agents_ran=%d trace=%s final_chars=%d",
+        stage2.get("agent_count", 0), trace, len(final),
+    )
+    return {"final": final, "trace": trace}
+
+
 def _log_message_trace(messages: list) -> None:
-    """Log each message the agent emitted, so the full turn is visible in the log."""
     for i, m in enumerate(messages):
         kind = type(m).__name__
         content = getattr(m, "content", "")
@@ -362,7 +401,7 @@ def _log_message_trace(messages: list) -> None:
 
 
 def _unwrap_envelope_if_echoed(text: str) -> Optional[str]:
-    """If the model copy-pasted a SkillResult envelope as its final reply,"""
+    """If the model parroted a SkillResult envelope as its final reply, return its .output."""
     stripped = (text or "").strip()
     if not stripped.startswith("{") or not stripped.endswith("}"):
         return None
@@ -370,13 +409,8 @@ def _unwrap_envelope_if_echoed(text: str) -> Optional[str]:
         obj = json.loads(stripped)
     except Exception:
         return None
-    if not isinstance(obj, dict):
+    if not isinstance(obj, dict) or "output" not in obj:
         return None
-
-    has_output_key = "output" in obj
-    if not has_output_key:
-        return None
-
     if not any(k in obj for k in ("skill", "ok", "metadata")):
         return None
     inner = obj.get("output")
@@ -393,23 +427,14 @@ _APOLOGY_MARKERS = (
 
 
 def _looks_like_self_apology(text: str) -> bool:
-    """True when the model abandoned the answer to apologize instead."""
     if not text:
         return False
-    lower = text.strip().lower()[:400] 
+    lower = text.strip().lower()[:400]
     return any(m in lower for m in _APOLOGY_MARKERS)
 
 
 def _looks_like_fake_tool_call_json(text: str) -> bool:
-    """True if a final message is actually an un-dispatched tool-call JSON blob.
-
-    Models that mis-emit tool calls as text usually do one of these shapes:
-      {"tool_call": {...}}
-      {"name": "...", "parameters": {...}}
-      {"name": "...", "arguments": {...}}
-      {"tool": "...", "tool_input": {...}}
-      {"action": "...", "action_input": {...}}
-    """
+    """True when the final reply is actually a tool-call JSON blob the model emitted as text instead of dispatching."""
     stripped = (text or "").strip()
     if not stripped.startswith("{") or not stripped.endswith("}"):
         return False
@@ -431,7 +456,6 @@ def _looks_like_fake_tool_call_json(text: str) -> bool:
 
 
 def _recover_from_fake_final(final_text: str, messages: list) -> str:
-    """When the final AIMessage is fake tool-call JSON, fall back to the last tool result."""
     for m in reversed(messages):
         if type(m).__name__ == "ToolMessage":
             content = str(getattr(m, "content", "") or "")
@@ -448,9 +472,32 @@ def _recover_from_fake_final(final_text: str, messages: list) -> str:
     )
 
 
+def _sub_trace_from_envelope(content) -> list[str]:
+    if isinstance(content, dict):
+        meta = content.get("metadata") or {}
+        return [str(x) for x in (meta.get("tool_trace") or [])]
+    if isinstance(content, str):
+        stripped = content.strip()
+        if stripped.startswith("{"):
+            try:
+                obj = json.loads(stripped)
+            except Exception:
+                return []
+            if isinstance(obj, dict):
+                meta = obj.get("metadata") or {}
+                return [str(x) for x in (meta.get("tool_trace") or [])]
+    return []
+
+
 def _extract_tool_trace(messages: list) -> list[str]:
-    """Pull out the ordered list of tool names the agent called."""
-    
+    """Ordered list of tool names. run_skill expands to run_skill:<skill>, run_agent to run_agent:<name>[nested...]."""
+    tm_by_id: dict = {}
+    for m in messages:
+        if type(m).__name__ == "ToolMessage":
+            tcid = getattr(m, "tool_call_id", None)
+            if tcid:
+                tm_by_id[tcid] = getattr(m, "content", "")
+
     names: list[str] = []
     for m in messages:
         if not isinstance(m, AIMessage):
@@ -459,10 +506,18 @@ def _extract_tool_trace(messages: list) -> list[str]:
         for tc in calls:
             name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
             args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
+            tcid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
             if not name:
                 continue
             if name == "run_skill" and isinstance(args, dict) and args.get("skill_name"):
                 names.append(f"run_skill:{args['skill_name']}")
+            elif name == "run_agent" and isinstance(args, dict) and args.get("agent_name"):
+                agent_name = args["agent_name"]
+                sub = _sub_trace_from_envelope(tm_by_id.get(tcid, ""))
+                if sub:
+                    names.append(f"run_agent:{agent_name}[{' → '.join(sub)}]")
+                else:
+                    names.append(f"run_agent:{agent_name}")
             else:
                 names.append(name)
     return names

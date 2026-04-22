@@ -12,6 +12,9 @@ from src.config import (
     VISION_MODEL,
     is_tool_capable,
 )
+
+from src.agent import TOOLS as _AGENT_TOOLS
+
 from src.db import (
     add_file_ref,
     add_message,
@@ -37,6 +40,7 @@ from src.registry import (
     seed_defaults,
 )
 from src.logger import get_logger
+from src.agent import run_router
 
 log = get_logger(__name__)
 
@@ -57,11 +61,8 @@ def _init_state():
 _init_state()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# HELPERS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Helpers ──────────────────────────────────────────────────────────────────
 def _switch_session(sid: str):
-    """Load a session from DB into the UI state."""
     st.session_state.session_id = sid
     st.session_state.messages   = [
         {"role": m["role"], "content": m["content"]}
@@ -70,14 +71,12 @@ def _switch_session(sid: str):
 
 
 def _save_upload(uploaded_file) -> Path:
-    """Save a Streamlit uploaded file to UPLOADS_DIR and return its path."""
     dest = UPLOADS_DIR / uploaded_file.name
     dest.write_bytes(uploaded_file.read())
     return dest
 
 
 def _add_and_display(role: str, content: str):
-    """Append to in-memory messages and persist to DB if session is active."""
     st.session_state.messages.append({"role": role, "content": content})
     if st.session_state.session_id:
         add_message(st.session_state.session_id, role, content)
@@ -90,11 +89,61 @@ def _get_models() -> list[str]:
         return [DEFAULT_MODEL]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR
-# ═══════════════════════════════════════════════════════════════════════════════
+def _agents_to_dot(agents: list[dict]) -> str:
+    """Render the registered-agent network as Graphviz DOT. Edges come from prev_nodes / next_nodes."""
+    if not agents:
+        return (
+            "digraph AgentNetwork {\n"
+            '  graph [label="Agent network (empty)", labelloc=t];\n'
+            "}\n"
+        )
+
+    names = {a["name"] for a in agents}
+    edges: set[tuple[str, str]] = set()
+    for a in agents:
+        name = a["name"]
+        for p in a.get("prev_nodes") or []:
+            if p in names:
+                edges.add((p, name))
+        for n in a.get("next_nodes") or []:
+            if n in names:
+                edges.add((name, n))
+
+    has_incoming = {dst for _, dst in edges}
+    has_outgoing = {src for src, _ in edges}
+
+    lines = [
+        "digraph AgentNetwork {",
+        "  rankdir=LR;",
+        '  graph [label="Agent network", labelloc=t, fontsize=16];',
+        '  node  [shape=box, style="rounded,filled", fontname="monospace", fontsize=11];',
+    ]
+    for a in agents:
+        n = a["name"]
+        desc = (a.get("description") or "").strip()
+        label = f"{n}\\n{desc[:50]}" if desc else n
+        is_source = n not in has_incoming and n in has_outgoing
+        is_sink = n in has_incoming and n not in has_outgoing
+        is_orphan = n not in has_incoming and n not in has_outgoing
+        if is_orphan:
+            style = 'fillcolor="#f0f0f0", color="#888888"'
+        elif is_source:
+            style = 'fillcolor="#cfe2ff", color="#084298"'
+        elif is_sink:
+            style = 'fillcolor="#d4edda", color="#1f7a3d", penwidth=2'
+        else:
+            style = 'fillcolor="#fff3cd", color="#665c00"'
+        lines.append(f'  "{n}" [label="{label}", {style}];')
+
+    for src, dst in sorted(edges):
+        lines.append(f'  "{src}" -> "{dst}";')
+
+    lines.append("}")
+    return "\n".join(lines)
+
+
+# ── Sidebar ──────────────────────────────────────────────────────────────────
 def _sidebar_model() -> str:
-    """Model picker + tool-capability banner. Returns the selected model name."""
     st.subheader("Model")
     models = _get_models()
     default_index = models.index(DEFAULT_MODEL) if DEFAULT_MODEL in models else 0
@@ -114,12 +163,11 @@ def _sidebar_model() -> str:
 
 
 def _sidebar_sessions(selected_model: str) -> None:
-    """Session list + create + active-session actions (rename/delete/export/import/memory/files)."""
     st.subheader("Sessions")
 
     with st.form("new_session", clear_on_submit=True):
         new_name = st.text_input("Session name", placeholder="My research session")
-        if st.form_submit_button("Create", use_container_width=True) and new_name:
+        if st.form_submit_button("Create", width="stretch") and new_name:
             sid = create_session(new_name, model=selected_model)
             _switch_session(sid)
             st.rerun()
@@ -131,7 +179,7 @@ def _sidebar_sessions(selected_model: str) -> None:
             is_active = s["id"] == st.session_state.session_id
             label = f"{'> ' if is_active else ''}{s['name']}"
             btn_type = "primary" if is_active else "secondary"
-            if st.button(label, key=f"sess_{s['id']}", use_container_width=True, type=btn_type):
+            if st.button(label, key=f"sess_{s['id']}", width="stretch", type=btn_type):
                 _switch_session(s["id"])
                 st.rerun()
 
@@ -140,39 +188,38 @@ def _sidebar_sessions(selected_model: str) -> None:
 
 
 def _sidebar_active_session(sid: str) -> None:
-    """Actions available only when a session is selected."""
     st.divider()
     st.caption("Session actions")
 
     col_a, col_b = st.columns(2)
     with col_a:
-        if st.button("Info", use_container_width=True):
+        if st.button("Info", width="stretch"):
             st.info(session_summary(sid))
     with col_b:
-        if st.button("Delete", use_container_width=True, type="secondary"):
+        if st.button("Delete", width="stretch", type="secondary"):
             delete_session(sid)
             st.session_state.session_id = None
             st.session_state.messages = []
             st.rerun()
 
     new_n = st.text_input("Rename", placeholder="New name…", key="rename_input")
-    if st.button("Rename", use_container_width=True) and new_n:
+    if st.button("Rename", width="stretch") and new_n:
         rename_session(sid, new_n)
         st.rerun()
 
-    if st.button("Export JSON", use_container_width=True):
+    if st.button("Export JSON", width="stretch"):
         data = export_session(sid)
         st.download_button(
             "Download",
             data=json.dumps(data, indent=2),
             file_name=f"session_{sid[:8]}.json",
             mime="application/json",
-            use_container_width=True,
+            width="stretch",
         )
 
     st.divider()
     uploaded_json = st.file_uploader("Import session JSON", type="json", key="import_upload")
-    if uploaded_json and st.button("Import", use_container_width=True):
+    if uploaded_json and st.button("Import", width="stretch"):
         data = json.loads(uploaded_json.read())
         new_sid = import_session(data)
         _switch_session(new_sid)
@@ -194,7 +241,6 @@ def _sidebar_active_session(sid: str) -> None:
 
 
 def _sidebar_skills() -> None:
-    """Custom-skills register form + existing-skills list with delete buttons."""
     st.subheader("Custom Skills")
     with st.expander("Register new skill"):
         with st.form("reg_skill", clear_on_submit=True):
@@ -206,7 +252,7 @@ def _sidebar_skills() -> None:
                 "Model override (blank = use .env DEFAULT_MODEL)",
                 placeholder="e.g. llama3.2:latest",
             )
-            if st.form_submit_button("Register", use_container_width=True) and sk_name:
+            if st.form_submit_button("Register", width="stretch") and sk_name:
                 register_skill(sk_name, sk_desc, sk_sys, sk_tmpl, model=sk_model or None)
                 st.success(f"Skill '{sk_name}' registered!")
 
@@ -222,20 +268,21 @@ def _sidebar_skills() -> None:
 
 
 def _sidebar_agents() -> None:
-    """Custom-agents register form + existing-agents list with delete buttons."""
     st.subheader("Custom Agents")
+
+    existing = list_agents()
+    existing_names = [a["name"] for a in existing]
+
     with st.expander("Register new agent"):
-        # Imported lazily so an agent.py import error doesn't blow up the sidebar
         try:
-            from src.agent import TOOLS as _AGENT_TOOLS
             available_tools = sorted(t.name for t in _AGENT_TOOLS if t.name != "run_agent")
         except Exception:
             available_tools = []
 
         with st.form("reg_agent", clear_on_submit=True):
-            ag_name  = st.text_input("Name (no spaces)", key="ag_name")
-            ag_desc  = st.text_input("Description", key="ag_desc")
-            ag_sys   = st.text_area(
+            ag_name = st.text_input("Name (no spaces)", key="ag_name")
+            ag_desc = st.text_input("Description", key="ag_desc")
+            ag_sys  = st.text_area(
                 "System prompt (how the sub-agent should behave)",
                 key="ag_sys",
                 height=120,
@@ -244,31 +291,65 @@ def _sidebar_agents() -> None:
                 "Tools this agent is expected to use (hint to the planner)",
                 options=available_tools,
                 default=[],
-                help="Descriptive hint only — run_agent gives the sub-agent access to all basic tools.",
+            )
+            ag_prev = st.multiselect(
+                "Previous node(s) — agents that feed into this one",
+                options=existing_names,
+                default=[],
+                help="Creates an edge from each selected agent → this one.",
+            )
+            ag_next = st.multiselect(
+                "Next node(s) — agents this one feeds into",
+                options=existing_names,
+                default=[],
+                help="Creates an edge from this one → each selected agent.",
             )
             ag_model = st.text_input(
                 "Model override (blank = use .env DEFAULT_MODEL)",
                 placeholder="e.g. llama3.2:latest",
                 key="ag_model",
             )
-            if st.form_submit_button("Register agent", use_container_width=True) and ag_name:
-                register_agent(ag_name, ag_desc, ag_sys, tools=ag_tools, model=ag_model or None)
+            if st.form_submit_button("Register agent", width="stretch") and ag_name:
+                register_agent(
+                    ag_name,
+                    ag_desc,
+                    ag_sys,
+                    tools=ag_tools,
+                    model=ag_model or None,
+                    prev_nodes=ag_prev or None,
+                    next_nodes=ag_next or None,
+                )
                 st.success(f"Agent '{ag_name}' registered!")
+                st.rerun()
 
-    existing = list_agents()
     if existing:
         with st.expander(f"{len(existing)} registered agent(s)"):
             for ag in existing:
                 col1, col2 = st.columns([3, 1])
-                tool_list = ", ".join(ag.get("tools") or []) or "_(no tools pinned)_"
-                col1.markdown(f"**{ag['name']}** — {ag['description']}  \nTools: {tool_list}")
+                lines = [f"**{ag['name']}** — {ag['description']}"]
+                if ag.get("tools"):
+                    lines.append(f"Tools: {', '.join(ag['tools'])}")
+                if ag.get("prev_nodes"):
+                    lines.append(f"Prev: {', '.join(ag['prev_nodes'])}")
+                if ag.get("next_nodes"):
+                    lines.append(f"Next: {', '.join(ag['next_nodes'])}")
+                col1.markdown("  \n".join(lines))
                 if col2.button("Delete", key=f"del_ag_{ag['name']}"):
                     delete_agent(ag["name"])
                     st.rerun()
 
+        with st.expander("Agent network", expanded=False):
+            try:
+                st.graphviz_chart(_agents_to_dot(existing), width="stretch")
+                st.caption(
+                    "Blue = source (no prev). Green bold = sink (no next). "
+                    "Yellow = middle. Gray = orphan."
+                )
+            except Exception as exc:
+                st.error(f"Cannot render: {type(exc).__name__}: {exc}")
+
 
 def _render_sidebar(model: str) -> str:
-    """Render the full sidebar. Returns the selected model."""
     with st.sidebar:
         st.title("Ollama MCP")
         selected_model = _sidebar_model()
@@ -280,19 +361,13 @@ def _render_sidebar(model: str) -> str:
     return selected_model
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# MAIN CONTENT AREA
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Main content area ────────────────────────────────────────────────────────
 
 def _render_chat_history():
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MAIN — LLM-driven tool routing (see src/agent.py)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def _render_attachment_slot():
     counter = st.session_state.get("attach_counter", 0)
@@ -310,8 +385,6 @@ def _render_attachment_slot():
 
 
 def main():
-    from src.agent import run_router
-
     model = _render_sidebar(DEFAULT_MODEL)
 
     session_label = ""

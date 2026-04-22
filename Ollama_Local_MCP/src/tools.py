@@ -45,21 +45,9 @@ _REEXPORTS = (clear_index, index_pdf, index_stats, index_text, index_url, retrie
 log = get_logger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# STANDARD ENVELOPE — every skill / agent returns this shape so chains
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Standard envelope every skill / agent returns ────────────────────────────
 
 class SkillResult(TypedDict, total=False):
-    """Uniform return shape for run_skill and run_agent.
-
-    Contract:
-      - ok       : True on success, False when error is set.
-      - skill    : name of the skill or agent that produced the result.
-      - output   : primary text the next step should consume. Empty on error.
-      - metadata : bookkeeping (model, duration_s, input_chars, output_chars, ...).
-      - data     : structured side-channel (citations, chunk info, tool traces).
-      - error    : human-readable error message when ok is False; otherwise None.
-    """
     ok: bool
     skill: str
     output: str
@@ -76,7 +64,6 @@ def envelope(
     metadata: Optional[dict] = None,
     error: Optional[str] = None,
 ) -> SkillResult:
-    """Build a standardized SkillResult envelope."""
     return {
         "ok": error is None,
         "skill": skill,
@@ -88,23 +75,19 @@ def envelope(
 
 
 def extract_output(result: Any) -> str:
-    """Pull `output` from a SkillResult."""
+    """Pull `.output` from an envelope, or return the value unchanged."""
     if isinstance(result, dict) and "output" in result:
         return result.get("output", "") or ""
-    
     return str(result) if result is not None else ""
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CORE — LangChain ChatOllama wrapper
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── LangChain ChatOllama wrapper ─────────────────────────────────────────────
 def _ollama_chat(
     prompt: str,
     system: str = "",
     model: str = DEFAULT_MODEL,
     history: list[dict] | None = None,
 ) -> str:
-    """Wrap ChatOllama so existing callers keep the same signature."""
     messages = []
     if system:
         messages.append(SystemMessage(content=system))
@@ -140,9 +123,7 @@ def _encode_image(path: str) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CORE TOOLS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Core tools ───────────────────────────────────────────────────────────────
 @log_call
 def chat(
     prompt: str,
@@ -183,9 +164,7 @@ def list_models() -> list[str]:
     return [model["name"] for model in response.json().get("models", [])]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# WEB SEARCH TOOLS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Web search tools ─────────────────────────────────────────────────────────
 @log_call
 def web_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> list[dict]:
     """Search the web via DuckDuckGo. Returns title, url, snippet."""
@@ -244,9 +223,7 @@ def research(
     return f"{answer}\n\nSources:\n{sources}"
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PDF TOOLS (with OCR: tesseract-first, vision-model fallback)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Pdf tools (with ocr: tesseract-first, vision-model fallback) ─────────────
 def _page_nums(pages: str, total: int) -> list[int]:
     if pages == "all":
         return list(range(total))
@@ -382,9 +359,7 @@ def pdf_summarize(path: str, model: str = DEFAULT_MODEL, include_images: bool = 
     return extract_output(summarize(text, style="bullets", model=model))
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# IMAGE TOOLS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Image tools ──────────────────────────────────────────────────────────────
 _ollama_client = _OllamaClient(host=OLLAMA_BASE)
 
 
@@ -424,9 +399,7 @@ def ocr_image(path: str, model: str = VISION_MODEL) -> str:
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SKILL TOOLS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Skill tools ──────────────────────────────────────────────────────────────
 def _chunk_text(
     text: str,
     chunk_size: int = SUMMARIZE_CHUNK_SIZE,
@@ -559,9 +532,7 @@ def code_review(code: str, language: str = "Python", model: str = DEFAULT_MODEL)
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CUSTOM SKILL RUNNER
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Custom skill runner ──────────────────────────────────────────────────────
 @log_call
 def run_skill(
     skill_name: str,
@@ -622,9 +593,7 @@ def list_pipeline() -> list[dict]:
     return _list()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# UTILITY
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Utility ──────────────────────────────────────────────────────────────────
 def ollama_is_running() -> bool:
     """Quick health check — True if Ollama is reachable."""
     try:

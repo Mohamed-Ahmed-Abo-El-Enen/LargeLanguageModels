@@ -6,8 +6,10 @@ from src.config import REGISTRY_PATH
 
 def _load() -> dict:
     if REGISTRY_PATH.exists():
-        return json.loads(REGISTRY_PATH.read_text())
-    
+        data = json.loads(REGISTRY_PATH.read_text())
+        data.setdefault("skills", [])
+        data.setdefault("agents", [])
+        return data
     return {"skills": [], "agents": []}
 
 
@@ -23,7 +25,6 @@ def register_skill(
     user_prompt_template: str,
     model: Optional[str] = None,
 ) -> dict:
-    """Register a custom prompt-based skill."""
     reg = _load()
     reg["skills"] = [s for s in reg["skills"] if s["name"] != name]
 
@@ -66,8 +67,10 @@ def register_agent(
     system_prompt: str,
     tools: list[str],
     model: Optional[str] = None,
+    prev_nodes: Optional[list[str]] = None,
+    next_nodes: Optional[list[str]] = None,
 ) -> dict:
-    """Register a named agent that chains multiple tools."""
+    # prev_nodes / next_nodes are edge hints for the sidebar network viz; they don't affect execution.
     reg = _load()
     reg["agents"] = [a for a in reg["agents"] if a["name"] != name]
 
@@ -79,6 +82,10 @@ def register_agent(
     }
     if model:
         agent["model"] = model
+    if prev_nodes:
+        agent["prev_nodes"] = list(prev_nodes)
+    if next_nodes:
+        agent["next_nodes"] = list(next_nodes)
 
     reg["agents"].append(agent)
     _save(reg)
@@ -114,7 +121,6 @@ def list_all() -> dict:
 
 # ── Seed defaults  ───────────────────────────────────
 def seed_defaults():
-    """Populate the registry with starter skills if it is empty."""
     if REGISTRY_PATH.exists():
         return
 
@@ -147,4 +153,36 @@ def seed_defaults():
         description="Search for news on a topic and produce an executive summary with sources.",
         system_prompt="You are a senior analyst. Summarize clearly. Cite sources by [number].",
         tools=["web_search", "summarize"],
+    )
+
+    register_agent(
+        name="research_brief",
+        description=(
+            "Deep-research a topic and write a concise executive brief. Use this when "
+            "the user wants a structured overview of a subject with citations — not a "
+            "single-page summary."
+        ),
+        system_prompt=(
+            "You are a senior research analyst. Your job is to produce a tight, "
+            "well-structured brief on the topic the user gives you.\n\n"
+            "Workflow:\n"
+            "1. Call `research` with the topic to gather sources and an initial synthesis.\n"
+            "2. If one source is clearly authoritative and needs depth, call `fetch_page` "
+            "   on its URL for the full text.\n"
+            "3. Call `summarize` with style='bullets' on the assembled material if it's "
+            "   longer than a few paragraphs.\n"
+            "4. Optionally call `run_skill` with skill_name='bullet_points' to tighten "
+            "   the final bullet list.\n\n"
+            "Output format (markdown):\n"
+            "  ## Overview\n"
+            "  <2-3 sentence plain-prose summary>\n\n"
+            "  ## Key findings\n"
+            "  - <bullet 1>\n  - <bullet 2>\n  - <bullet 3-7>\n\n"
+            "  ## Sources\n"
+            "  [1] <title> — <url>\n  [2] ...\n\n"
+            "Cite findings inline as [1], [2]. Do not invent sources or URLs — if a "
+            "claim has no source, drop it. Keep the whole brief under ~400 words."
+        ),
+        tools=["research", "fetch_page", "summarize", "run_skill"],
+        next_nodes=["news_analyst"],
     )
